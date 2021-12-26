@@ -1,0 +1,193 @@
+---
+title: "Analisis Sentimen dan Visualisasi Data Ulasan Produk Elektronik Amazon"
+author: "A. Aliyah Almairah Syarif Putri dan Hanifah Amani Shabihah"
+output: html_notebook
+---
+
+Library yang digunakan
+```{r}
+library(dplyr)
+library(tidyr)
+library(tidytext)
+library(textdata)
+library(purrr)
+library(vroom)
+library(here)
+library(shiny)
+library(ggplot2)
+library(plotly)
+library(wordcloud)
+```
+
+Membaca data set ulasan yang diambil dari data.world
+```{r}
+dataset <- vroom(here('Datafiniti_Amazon_Consumer_Reviews_of_Amazon_Products.csv'))
+```
+
+Setiap review dibuat menjadi teks rapi atau objek corpus
+```{r}
+reviews <- dataset %>% select(reviews.text)
+head(reviews)
+```
+
+Menghapus elemen http
+```{r}
+reviews$stripped_text1 <- gsub("http\\S+","",reviews$reviews.text) 
+```
+
+Mengonversi menjadi huruf kecil dan menghapus tanda baca
+```{r}
+reviews_stem <- reviews %>% 
+  select(stripped_text1) %>%
+  unnest_tokens(word, stripped_text1)
+
+head(reviews_stem)
+```
+Menghapus kata-kata stopwords
+```{r}
+cleaned_reviews <- reviews_stem %>% anti_join(stop_words)
+
+head(cleaned_reviews)
+```
+20 kata teratas pada data set review
+```{r}
+cleaned_reviews %>% 
+  count(word, sort=TRUE) %>%
+  top_n(20) %>%
+  mutate(word = reorder(word, n)) %>%
+  ggplot(aes(x=word, y=n)) + geom_col() +
+coord_flip() +
+  theme_classic() +
+  labs(x="Count",
+       y="Unique Word",
+       title="Top 20 Words on Amazon Electronic Product Reviews")
+
+```
+
+Melakukan analisis sentimen menggunakan Bing yang akan dikembalikan ke sebuah tibble
+```{r}
+bing_reviews <- cleaned_reviews %>% inner_join(get_sentiments("bing")) %>% count(word, sentiment, sort=TRUE) %>% ungroup()
+```
+Melakukan visualisasi jumlah kata dengan membandingkan jumlah ulasan emosi positif dan negatif
+```{r}
+bing_reviews %>% group_by(sentiment) %>% top_n(10) %>% ggplot(aes(word, n, fill = sentiment)) + geom_col(show.legend = FALSE) + facet_wrap(~sentiment, scales = "free_y") + labs(title = "Amazon Electronic Product Reviews", y='Contriubution to Sentiment', x = NULL) + coord_flip() + theme_bw()
+```
+
+Membuat fungsi untuk mendapatkan skor sentimen untuk setiap review
+```{r}
+sentiment_bing = function(rvw){
+  rvw_tbl <- tibble(text = rvw) %>% 
+    mutate(
+      stripped_text = gsub("http\\S+","",text)
+    ) %>% 
+    unnest_tokens(word, stripped_text) %>% 
+    anti_join(stop_words) %>%
+    inner_join(get_sentiments("bing")) %>%
+    count(word,sentiment,sort=TRUE) %>%
+    ungroup() %>%
+    #buat kolom "skor" yang menetapkan -1 untuk semua kata negatif, dan 1 untuk kata positif
+    mutate(
+      score = case_when(
+        sentiment == 'negative'~n*(-1),
+        sentiment == 'positive'~n*1)
+    )
+  
+  #menghitung total score
+  sent.score = case_when(
+    nrow(rvw_tbl) == 0~0, #jika tidak ada kata, skor adalah 0
+    nrow(rvw_tbl)>0~sum(rvw_tbl$score) #selainnya, jumlah positif dan negatif
+  )
+  
+  #untuk melacak review mana yang tidak mengandung kata sama sekali di daftar bing
+  zero.type <- case_when(
+    nrow(rvw_tbl)==0~"Type 1",
+    nrow(rvw_tbl)>0~"Type 2"
+  )
+  list(score = sent.score, type = zero.type, rvw_tbl = rvw_tbl)
+}
+```
+
+Menerapkan fungsi skor sentimen. Fungsi lapply mengembalikan list semua skor sentimen, jenis, dan tabel
+```{r}
+review_sent <- lapply(dataset$reviews.text, function(x){sentiment_bing(x)})
+review_sent
+```
+
+Membuat tibble yang menentukan kata, skor, dan jenisnya
+```{r}
+review_sentiment <- bind_rows(tibble(word = 'Reviews',
+                 score = unlist(map(review_sent, 'score')),
+                 type = unlist(map(review_sent, 'type'))))
+
+```
+
+Melihat skor di setiap kategori sentimen
+```{r}
+ggplot(review_sentiment, aes(x=score, fill = word)) + geom_histogram(bins = 15, alpha = .6) + facet_grid(~word) +theme_bw()
+```
+
+Menampilkan visualisasi pada UI
+```{r}
+ui <- fluidPage(
+        titlePanel("DATA ULASAN PRODUK ELEKTRONIK AMAZON"),
+        mainPanel(
+          tabsetPanel(
+            type = "tabs",
+            tabPanel("Unique Words", plotOutput('barplot1')),
+            tabPanel("Reviews Emotions", plotOutput('barplot2')),
+            tabPanel("Wordcloud", plotOutput('wordcloud')),
+            tabPanel("Sentiment Score", plotOutput('barplot3'))
+          )
+        )
+      )
+
+#SERVER
+server <- function(input,output){
+  
+            output$barplot1 <- renderPlot({
+              cleaned_reviews %>% 
+                count(word, sort=TRUE) %>%
+                top_n(20) %>%
+                mutate(word = reorder(word, n)) %>%
+                ggplot(aes(x=word, y=n)) + geom_col() +
+                  coord_flip() +
+                  theme_classic() +
+                  labs(x="Count",
+                      y="Unique Word",
+                      title="Top 20 Words on Amazon Electronic Product Reviews")
+            })
+            
+            
+            output$barplot2 <- renderPlot({
+                bing_reviews %>% group_by(sentiment) %>% top_n(10) %>%
+                  ggplot(aes(word, n, fill = sentiment)) + 
+                    geom_col(show.legend = FALSE) + 
+                    facet_wrap(~sentiment, scales = "free_y") + 
+                    labs(title = "Amazon Electronic Product Reviews",
+                         y='Contriubution to Sentiment', x = NULL) + 
+                    coord_flip() + theme_bw()
+            })
+            
+            
+            output$barplot3 <- renderPlot({
+              ggplot(review_sentiment, aes(x=score, fill = word)) +
+                geom_histogram(bins = 15, alpha = .6) + 
+                facet_grid(~word) +theme_bw()
+            })
+            
+            
+            output$wordcloud <- renderPlot({
+              bing_reviews %>% 
+                with(wordcloud(
+                      words = word,
+                      freq = n,
+                      max.words = 100,
+                      random.order = FALSE,
+                      colors = brewer.pal(name = "Dark2", 8)
+                ))
+              
+            })
+}
+
+shinyApp(ui = ui, server = server)
+```
